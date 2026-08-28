@@ -10,20 +10,30 @@ Each run captures one intraday snapshot (keyed by UTC hour) of:
 
 Outputs:
 
-  data/raw/<hour>/twitch_top_games.json   verbatim Helix response
-  data/snapshots/twitch_top_games.csv     one row per game per snapshot
-  data/snapshots/twitch_game_streams.csv  per-game aggregates per snapshot
-  data/snapshots/twitch_top_streams.csv   top-3 streamers per game per snapshot
-  data/snapshots/steam_player_counts.csv  one row per app per snapshot
+  data/raw/<hour>/*.json                    verbatim small API responses
+  data/snapshots/<table>/<YYYY-MM>.csv      monthly partitions, one row per
+                                            entity per snapshot hour
 
-Design note: full stream lists (~100 games x 100 streams, every run) are
-ephemeral bulk, so unlike the raw-everything pattern they are aggregated
-at collect time; the tidy tables ARE the record for streams. Runs are
-idempotent per UTC hour: a retry inside the same hour replaces that
-hour's rows instead of duplicating them.
+Tables: twitch_top_games, twitch_game_streams, twitch_top_streams,
+steam_player_counts.
+
+Design notes:
+- Full stream lists (~100 games x 100 streams, every run) are ephemeral
+  bulk, so they are aggregated at collect time; the tidy tables ARE the
+  record for streams.
+- Runs are idempotent per UTC hour: a retry inside the same hour replaces
+  that hour's rows instead of duplicating them, and duplicate keys within
+  one batch are dropped (first occurrence wins) so an upstream API
+  repeating an entry cannot corrupt the table.
+- Schema evolution is additive: new columns backfill as empty for old
+  rows. Removing or renaming a column silently drops the old values on
+  the next rewrite of that partition - migrate by hand if they matter.
+- A failed per-game stream fetch skips that game and the run continues;
+  the run only fails if every fetch failed.
 
 Twitch credentials (free): register an app at dev.twitch.tv/console/apps,
-then put TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET in .env (see .env.example).
+then put TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET in .env (see .env.example)
+or the process environment.
 """
 
 from __future__ import annotations
@@ -52,39 +62,16 @@ SESSION = requests.Session()
 SESSION.headers["User-Agent"] = "stream-radar (portfolio research project)"
 
 
-# ---------------------------------------------------------------- shared io
+# ---------------------------------------------------------------- http
 
-def dump_raw(hour_dir: Path, name: str, payload) -> None:
-    hour_dir.mkdir(parents=True, exist_ok=True)
-    (hour_dir / name).write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
-
-
-def upsert_csv(path: Path, fieldnames: list[str], key_fields: list[str], new_rows: list[dict]) -> tuple[int, int]:
-    """Append-only table; rows whose key matches an incoming row are replaced,
-    so a retry within the same snapshot hour never duplicates keys."""
-    existing: list[dict] = []
-    if path.exists():
-        with path.open(newline="", encoding="utf-8") as f:
-            existing = list(csv.DictReader(f))
-    new_keys = {tuple(str(r[k]) for k in key_fields) for r in new_rows}
-    kept = [r for r in existing if tuple(str(r.get(k, "")) for k in key_fields) not in new_keys]
-    rows = kept + [{k: r.get(k, "") for k in fieldnames} for r in new_rows]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-    return len(new_rows), len(rows)
-
-
-def get_json(url: str, params: dict | None = None, headers: dict | None = None,
-             attempts: int = 4, base_wait: float = 5.0):
-    """GET with retry/backoff; 4xx other than 429 is permanent -> fail fast.
+def request_json(method: str, url: str, *, params: dict | None = None, data: dict | None = None,
+                 headers: dict | None = None, attempts: int = 4, base_wait: float = 5.0):
+    """Request with retry/backoff; 4xx other than 429 is permanent -> fail fast.
     (Lesson from the Steam collector: unretryable 404s once burned 7 minutes.)"""
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
-            resp = SESSION.get(url, params=params, headers=headers, timeout=30)
+            resp = SESSION.request(method, url, params=params, data=data, headers=headers, timeout=30)
             if resp.status_code == 200:
                 return resp.json()
             if 400 <= resp.status_code < 500 and resp.status_code != 429:
@@ -105,6 +92,57 @@ def get_json(url: str, params: dict | None = None, headers: dict | None = None,
     raise RuntimeError(f"gave up on {url}: {last_error}")
 
 
+def get_json(url: str, params: dict | None = None, headers: dict | None = None):
+    return request_json("GET", url, params=params, headers=headers)
+
+
+# ---------------------------------------------------------------- storage
+
+def dump_raw(hour_dir: Path, name: str, payload) -> None:
+    hour_dir.mkdir(parents=True, exist_ok=True)
+    (hour_dir / name).write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def upsert_csv(table: str, month: str, fieldnames: list[str], key_fields: list[str],
+               new_rows: list[dict]) -> tuple[int, int]:
+    """Upsert rows into the table's monthly partition file.
+
+    - Duplicate keys within new_rows are dropped (first occurrence wins).
+    - Existing rows whose key matches an incoming row are replaced.
+    - Existing rows are projected onto the current fieldnames, so a later
+      column addition never crashes old partitions (removed columns are
+      dropped on rewrite - see module docstring).
+    Returns (rows_written, partition_total)."""
+    deduped: list[dict] = []
+    seen: set[tuple] = set()
+    for r in new_rows:
+        key = tuple(str(r[k]) for k in key_fields)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(r)
+    if len(deduped) < len(new_rows):
+        print(f"  WARNING: {table}: dropped {len(new_rows) - len(deduped)} duplicate-key rows within this batch")
+
+    path = SNAP_DIR / table / f"{month}.csv"
+    existing: list[dict] = []
+    if path.exists():
+        with path.open(newline="", encoding="utf-8") as f:
+            existing = list(csv.DictReader(f))
+    kept = [
+        {k: r.get(k, "") for k in fieldnames}
+        for r in existing
+        if tuple(str(r.get(k, "")) for k in key_fields) not in seen
+    ]
+    rows = kept + [{k: r.get(k, "") for k in fieldnames} for r in deduped]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    return len(deduped), len(rows)
+
+
 # ---------------------------------------------------------------- twitch
 
 class TwitchClient:
@@ -116,15 +154,12 @@ class TwitchClient:
         self.token: str | None = None
 
     def _authenticate(self) -> None:
-        resp = SESSION.post(
-            TOKEN_URL,
+        payload = request_json(
+            "POST", TOKEN_URL,
             data={"client_id": self.client_id, "client_secret": self.client_secret,
                   "grant_type": "client_credentials"},
-            timeout=30,
         )
-        if resp.status_code != 200:
-            raise RuntimeError(f"Twitch auth failed (HTTP {resp.status_code}): {resp.text[:200]}")
-        self.token = resp.json()["access_token"]
+        self.token = payload["access_token"]
 
     def get(self, path: str, params: dict) -> dict:
         if self.token is None:
@@ -140,7 +175,7 @@ class TwitchClient:
             raise
 
 
-def collect_twitch(twitch: TwitchClient, hour: str, hour_dir: Path, sleep_s: float) -> None:
+def collect_twitch(twitch: TwitchClient, hour: str, month: str, hour_dir: Path, sleep_s: float) -> None:
     payload = twitch.get("/games/top", {"first": 100})
     dump_raw(hour_dir, "twitch_top_games.json", payload)
     games = payload.get("data", [])
@@ -148,6 +183,7 @@ def collect_twitch(twitch: TwitchClient, hour: str, hour_dir: Path, sleep_s: flo
     game_rows: list[dict] = []
     stream_agg_rows: list[dict] = []
     top_stream_rows: list[dict] = []
+    failures: list[str] = []
 
     for rank, game in enumerate(games, start=1):
         game_id = game["id"]
@@ -155,7 +191,12 @@ def collect_twitch(twitch: TwitchClient, hour: str, hour_dir: Path, sleep_s: flo
             {"snapshot_hour_utc": hour, "rank": rank, "game_id": game_id,
              "igdb_id": game.get("igdb_id", ""), "name": game.get("name", "")}
         )
-        streams = twitch.get("/streams", {"game_id": game_id, "first": 100})
+        try:
+            streams = twitch.get("/streams", {"game_id": game_id, "first": 100})
+        except RuntimeError as exc:
+            failures.append(f"{game.get('name', game_id)}: {exc}")
+            time.sleep(sleep_s)
+            continue
         data = streams.get("data", [])
         viewers = [s.get("viewer_count", 0) for s in data]
         total = sum(viewers)
@@ -187,33 +228,40 @@ def collect_twitch(twitch: TwitchClient, hour: str, hour_dir: Path, sleep_s: flo
             )
         time.sleep(sleep_s)
 
+    if failures:
+        print(f"  WARNING: {len(failures)} of {len(games)} stream fetches failed; skipped those games:")
+        for line in failures[:5]:
+            print(f"    {line}")
+        if len(failures) == len(games):
+            raise RuntimeError("every stream fetch failed - aborting so the run is marked failed")
+
     written, total_rows = upsert_csv(
-        SNAP_DIR / "twitch_top_games.csv",
+        "twitch_top_games", month,
         ["snapshot_hour_utc", "rank", "game_id", "igdb_id", "name"],
         ["snapshot_hour_utc", "game_id"],
         game_rows,
     )
-    print(f"twitch_top_games: {written} rows for {hour} (table now {total_rows})")
+    print(f"twitch_top_games: {written} rows for {hour} (partition {month} now {total_rows})")
     written, total_rows = upsert_csv(
-        SNAP_DIR / "twitch_game_streams.csv",
+        "twitch_game_streams", month,
         ["snapshot_hour_utc", "game_id", "viewers_top100", "channels_top100",
          "truncated", "share_top1", "share_top10", "n_languages"],
         ["snapshot_hour_utc", "game_id"],
         stream_agg_rows,
     )
-    print(f"twitch_game_streams: {written} rows (table now {total_rows})")
+    print(f"twitch_game_streams: {written} rows (partition {month} now {total_rows})")
     written, total_rows = upsert_csv(
-        SNAP_DIR / "twitch_top_streams.csv",
+        "twitch_top_streams", month,
         ["snapshot_hour_utc", "game_id", "position", "user_login", "viewer_count", "language", "started_at"],
         ["snapshot_hour_utc", "game_id", "position"],
         top_stream_rows,
     )
-    print(f"twitch_top_streams: {written} rows (table now {total_rows})")
+    print(f"twitch_top_streams: {written} rows (partition {month} now {total_rows})")
 
 
 # ---------------------------------------------------------------- steam
 
-def collect_steam(hour: str, hour_dir: Path) -> None:
+def collect_steam(hour: str, month: str, hour_dir: Path) -> None:
     payload = get_json(STEAM_MOST_PLAYED_URL)
     dump_raw(hour_dir, "steam_most_played.json", payload)
     ranks = payload["response"]["ranks"]
@@ -228,12 +276,12 @@ def collect_steam(hour: str, hour_dir: Path) -> None:
         for r in ranks
     ]
     written, total_rows = upsert_csv(
-        SNAP_DIR / "steam_player_counts.csv",
+        "steam_player_counts", month,
         ["snapshot_hour_utc", "appid", "rank", "last_week_rank", "peak_in_game"],
         ["snapshot_hour_utc", "appid"],
         rows,
     )
-    print(f"steam_player_counts: {written} rows for {hour} (table now {total_rows})")
+    print(f"steam_player_counts: {written} rows for {hour} (partition {month} now {total_rows})")
 
 
 # ---------------------------------------------------------------- main
@@ -251,10 +299,11 @@ def main() -> int:
     load_dotenv(ROOT / ".env")
     started = time.monotonic()
     hour = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H")
+    month = hour[:7]
     hour_dir = RAW_DIR / hour
     print(f"Collecting snapshot {hour} (UTC)")
 
-    collect_steam(hour, hour_dir)
+    collect_steam(hour, month, hour_dir)
 
     if args.steam_only:
         print("(--steam-only: Twitch skipped)")
@@ -266,7 +315,7 @@ def main() -> int:
             print("Register a (free) app at https://dev.twitch.tv/console/apps,")
             print("then copy .env.example to .env and fill both values in.")
             return 2
-        collect_twitch(TwitchClient(client_id, client_secret), hour, hour_dir, args.twitch_sleep)
+        collect_twitch(TwitchClient(client_id, client_secret), hour, month, hour_dir, args.twitch_sleep)
 
     print(f"Done in {time.monotonic() - started:.0f}s")
     return 0

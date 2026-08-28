@@ -37,3 +37,20 @@ Build journal. One entry per step: what was done, why, how it was verified. A st
 
 **Real issues caught:**
 1. **Helix's pagination cursor doesn't mean more data.** `truncated` was first defined as "cursor present" and came back True for 100/100 games — including the two with a single live channel, which is impossible. Twitch returns a cursor even on exhausted result sets. Redefined as "full page returned" (`len(data) == 100`): now 37/100 — and therefore for 63 of 100 games, `viewers_top100` is the *complete* live viewer count, not a truncated proxy. For the 37 full-page games (big categories), viewers and concentration shares are top-100-of-category metrics: consistently defined, comparable across games and time, but undercounts of the long tail — acceptable for modeling, documented here for honesty.
+
+---
+
+## Step 2 — Review hardening + monthly partitions (2026-08-28)
+
+**Goal:** fix all five findings from the high-effort code review before the collector runs unattended — two confirmed cron-killers, two data-integrity landmines, one unbounded-growth design flaw.
+
+**What:**
+- A failed per-game `/streams` fetch now skips that game and continues (the game keeps its rank row, just no aggregates that hour); the run fails only if *every* fetch failed. Previously one permanent 404 mid-loop threw away all 100 games' data for the snapshot.
+- Token requests go through the same retry/backoff as every other network call (`request_json` refactor). Bad credentials still fail fast (401 is permanent by design).
+- `upsert_csv` drops duplicate keys *within* a batch (first occurrence wins, with a warning) — defense against upstream APIs repeating entries, which Steam's featured lists actually did on 2026-08-05.
+- Existing rows are projected onto the current fieldnames on rewrite: column adds backfill empty for old rows; removals/renames no longer crash old partitions. Schema evolution is additive-preferred, documented in the module docstring.
+- Snapshots moved to monthly partitions `data/snapshots/<table>/<YYYY-MM>.csv`, bounding per-run rewrite cost to one month instead of all history forever. August data migrated in place.
+
+**Verify:**
+- Synthetic tests (scratchpad, against the real `upsert_csv`): intra-batch dedupe first-wins with warning; same-hour replace; column removal doesn't crash; column add backfills empty — ALL PASS.
+- Live run (22s), landing in the same UTC hour as Step 1's runs: partition files written, 0 duplicate keys across all four tables, growth only by union-of-observations (102 games / 104 Steam apps seen within hour 2026-08-28T01 across four runs — the same chart-rotation mechanism as Step 1's Corsair Cove case, now at scale).
