@@ -71,3 +71,24 @@ Build journal. One entry per step: what was done, why, how it was verified. A st
 - First cloud run: **success** (actions/runs/33133516905). The bot committed `snapshot 2026-08-28T01:39Z`.
 - That run landed *inside the same UTC hour* as the local Step 1/2 runs — so the runner upserted hour 01 in place (801 insertions / 786 deletions) and the pulled table still has 0 duplicate keys. Cloud and local collectors colliding on one snapshot hour and producing a clean table is the cross-machine idempotency proof.
 - Cron fires every 2 hours at :17 UTC from here on; the repo now grows on its own.
+
+---
+
+## Step 4 — IGDB mapping + first watched-vs-played join (2026-08-28)
+
+**Goal:** connect Twitch categories to Steam appids so the viewership and playerbase series can join — the watched-vs-played ratio needs it, and so does every cross-platform model after it.
+
+**What:**
+- `update_igdb_map()` in the collector: IGDB `external_games` queried in batches of <=100 ids with the same Twitch app token (IGDB is Twitch-operated), filtered to `external_game_source = 1` (Steam). Catalog semantics: each igdb_id queried once ever; games with no Steam release recorded with an empty appid so they aren't re-queried; multi-appid games (editions) keep all rows.
+- `data/catalog/manual_map.csv`: hand-kept twitch_game_id -> steam_appid overrides for categories Twitch carries no igdb_id for. Manual rows win over IGDB on conflict.
+- Probe before code: verified the post-2024 field name `external_game_source` works, and spot-checked GTA V -> 271590, Rust -> 252490, World of Warcraft -> no Steam entry (Battle.net). All correct.
+
+**Verify (snapshot 2026-08-28T05):**
+- 84 igdb_ids queried: 63 map to Steam appids, 21 legitimately don't (launcher exclusives, non-games). 91 map rows total — the extras are multi-edition games, kept by design.
+- With overrides, 65/100 of the hour's Twitch top-100 carry a Steam appid; 38 also sit in Steam's top-100 chart.
+- The first ratio table validates the project thesis immediately: Escape from Tarkov at watch/play **1.381** (more Twitch viewers than the game's daily Steam peak — a "watch game", and top1_share 0.80 says one streamer is carrying it) versus CS2 at **0.019** and Dota 2 at **0.021** (played, not watched). Both extremes exist only via the manual map.
+
+**Real issues caught:**
+1. **Twitch's igdb_id coverage fails exactly where it hurts most.** 16 categories in the hour lack an igdb_id; most are non-games (Just Chatting, Music, Slots), but CS2 — filed under the legacy "Counter-Strike" category (32399) — and Dota 2 (29595) are in that set. Steam's two biggest games would have silently missed every join. Lesson: never assume a platform's own foreign keys cover the head of the distribution; verify against the entities that matter most.
+2. **Local runs race the cron.** A local collect ran while remote state was assumed current; with bot commits possible at any :17 odd hour, partition CSVs can rebase-conflict. Practice adopted: pull before any local run; if a conflict threatens, discard local data rows, pull, re-collect — idempotent upserts make the re-run free (~23s).
+3. **The 2-hour cron hasn't fired yet** (03:17 and 05:17 produced no runs; workflow state is "active" and the manual dispatch was green). Consistent with GitHub's known new-repo scheduler lag / load-shedding of short-interval crons. Watching the 07:17 UTC slot before changing anything.
