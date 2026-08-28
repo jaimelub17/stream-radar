@@ -1,56 +1,7 @@
-# Stream Radar
+# Stream Radar — moved
 
-![collect](https://github.com/jaimelub17/stream-radar/actions/workflows/collect.yml/badge.svg)
+This project now lives in the portfolio umbrella:
 
-Which game is Twitch about to crown next? A data-science project that watches live Twitch viewership and Steam player counts, and learns to call breakout games **before** they peak.
+**➡ [github.com/jaimelub17/projects/tree/main/stream-radar](https://github.com/jaimelub17/projects/tree/main/stream-radar)** — code, self-refreshing data, and the [live breakout leaderboard](https://github.com/jaimelub17/projects/blob/main/stream-radar/reports/breakout_watch.md).
 
-Streamers and video creators constantly ask "what should I cover next?" — by the time a game tops the charts, that window is gone. Stream Radar snapshots the live rankings every couple of hours and turns its own accumulated history into predictive signals.
-
-## 📈 Live: [Breakout Watch leaderboard](reports/breakout_watch.md)
-
-Rebuilt on every collection cycle: the momentum leaderboard (who's blowing up), **ignition alerts** (a big-reach streamer currently dominating a small game — the event that starts streamer-driven blowups, flagged before growth shows), and the watched-vs-played extremes. Score components are fully transparent; `reports/breakout_watch.csv` carries the per-game feature breakdown.
-
-## The science (what makes this more than a dashboard)
-
-- **Breakout prediction.** Label: *does a game enter the Twitch top 20 by viewers within the next 7 days?* Features from collected history: viewer/channel momentum, rank velocity, Steam player growth, concentration shifts. Models are backtested on held-out weeks with calibration reported honestly.
-- **Organic vs. manufactured growth.** Viewer *concentration* (top-1 / top-10 streamer share) separates a sponsored mega-streamer spike from hundreds of small channels adopting a game organically. Hypothesis to test: breadth leads durable breakouts, concentration spikes decay.
-- **Watched vs. played.** Twitch viewers ÷ Steam players. Esports run high (watched, not played), cozy games run low (played, not watched) — and a rising ratio is a candidate leading indicator of content-driven booms.
-
-## How it works
-
-```
-Twitch Helix API + Steam charts ──► ingest/collect.py (every ~2h, scheduled)
-                                        │
-                                        ▼
-                          data/ (append-only snapshots, versioned in git)
-                                        │
-                                        ▼
-                          models: momentum baselines → backtested classifier
-                                        │
-                                        ▼
-                          breakout leaderboard + findings write-ups
-```
-
-Snapshots are keyed by UTC hour and idempotent (a retry replaces that hour's rows, never duplicates them). Full stream lists are aggregated at collect time — viewers, channels, concentration shares, language spread, top-3 streamers per game — because the per-stream firehose is ephemeral bulk; the aggregates are the record.
-
-## Data sources
-
-| Source | Signal | Access |
-|---|---|---|
-| Twitch Helix `/games/top` | Top 100 categories by live viewers | Free app token |
-| Twitch Helix `/streams` | Per-game viewers, channels, concentration, languages, top streamers | Free app token |
-| Steam `GetMostPlayedGames` | Top 100 games by players (rank, last-week rank, daily peak) | Free, keyless |
-| IGDB `external_games` | Twitch game ↔ Steam appid mapping (plus a hand-kept override file for categories Twitch carries no igdb_id for — notably CS2 and Dota 2) | Same Twitch token |
-
-## Running it locally
-
-```
-py -3 -m venv .venv
-.venv\Scripts\python -m pip install -r requirements.txt
-copy .env.example .env   (fill in your Twitch app credentials)
-run.cmd
-```
-
-## Notes
-
-Not affiliated with Twitch, Valve, or IGDB. Public APIs, polite rate limiting, research/portfolio use.
+This repository is archived as the project's early build history: Steps 1–6 commit by commit, the first automated collection cycles, and two code-review hardening passes (see `PROJECT_LOG.md`).
