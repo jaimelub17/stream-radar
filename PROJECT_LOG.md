@@ -92,3 +92,20 @@ Build journal. One entry per step: what was done, why, how it was verified. A st
 1. **Twitch's igdb_id coverage fails exactly where it hurts most.** 16 categories in the hour lack an igdb_id; most are non-games (Just Chatting, Music, Slots), but CS2 — filed under the legacy "Counter-Strike" category (32399) — and Dota 2 (29595) are in that set. Steam's two biggest games would have silently missed every join. Lesson: never assume a platform's own foreign keys cover the head of the distribution; verify against the entities that matter most.
 2. **Local runs race the cron.** A local collect ran while remote state was assumed current; with bot commits possible at any :17 odd hour, partition CSVs can rebase-conflict. Practice adopted: pull before any local run; if a conflict threatens, discard local data rows, pull, re-collect — idempotent upserts make the re-run free (~23s).
 3. **The 2-hour cron hasn't fired yet** (03:17 and 05:17 produced no runs; workflow state is "active" and the manual dispatch was green). Consistent with GitHub's known new-repo scheduler lag / load-shedding of short-interval crons. Watching the 07:17 UTC slot before changing anything.
+
+---
+
+## Step 5 — Breakout Watch: momentum leaderboard + ignition alerts (2026-08-28)
+
+**Goal:** the first predictive surface — rank which games are blowing up next (the PEAK / Big Walk pattern), with streamer influence modeled explicitly, since one big streamer picking up a small game is how many blowups start.
+
+**What:**
+- `analyze/momentum.py` → `reports/breakout_watch.md` + `.csv` (per-game feature/component dump — the future training table). Momentum score v0.1 = weighted sum of: viewer and channel log-growth over ~6h / ~24h windows (nearest-snapshot fallback while history is young), chart-entry bonuses, rank climb, a breadth bonus when channels grow at least as fast as viewers (organic adoption beats one channel raiding), Steam daily-peak confirmation for mapped games, and **IGNITION** — a top-decile-reach streamer (reach = their max viewers observed anywhere in history) currently on a game outside the top 20.
+- **Ignition alerts** section: big-reach streamer holding ≥50% of a small game right now — flagged *before* any growth exists.
+- Weights are transparent priors, deliberately not fitted; the plan of record is backtested weights against the label "enters the Twitch top 20 within 7 days" once weeks of history accumulate.
+- Wired into the Actions workflow after collection (`git add data reports`) — the repo recommits a fresh leaderboard every cycle.
+
+**Verify:**
+- Hand-recomputed the #1 score from raw rows — Rust +3.53: viewers 5,731→16,753 (log 1.073 × 2.0 = +2.15), channels 100→99 (−0.02), rank 52→17 (35 × 0.04 = +1.40), Steam flat (+0.00). Sum matches the reported score exactly.
+- The mechanisms fired on real cases on day one: Waterpark Simulator at #2 with ENTRY + IGNITION (vanillamace = 88% of its viewers); alerts also caught moonmoon at 96% of Darkest Dungeon (rank 26). Rust itself shows share_top1 0.33→0.71 alongside its surge — the report exposes concentration so the *quality* of growth is readable, not just the quantity.
+- Day-0 honesty, logged as such: with 2 snapshots 4h apart, ENTRY flags are partly chart-rotation noise (uniform +1.50 block) and the 24h window is empty; both self-resolve as history accumulates.

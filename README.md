@@ -6,6 +6,10 @@ Which game is Twitch about to crown next? A data-science project that watches li
 
 Streamers and video creators constantly ask "what should I cover next?" — by the time a game tops the charts, that window is gone. Stream Radar snapshots the live rankings every couple of hours and turns its own accumulated history into predictive signals.
 
+## 📈 Live: [Breakout Watch leaderboard](reports/breakout_watch.md)
+
+Rebuilt on every collection cycle: the momentum leaderboard (who's blowing up), **ignition alerts** (a big-reach streamer currently dominating a small game — the event that starts streamer-driven blowups, flagged before growth shows), and the watched-vs-played extremes. Score components are fully transparent; `reports/breakout_watch.csv` carries the per-game feature breakdown.
+
 ## The science (what makes this more than a dashboard)
 
 - **Breakout prediction.** Label: *does a game enter the Twitch top 20 by viewers within the next 7 days?* Features from collected history: viewer/channel momentum, rank velocity, Steam player growth, concentration shifts. Models are backtested on held-out weeks with calibration reported honestly.
