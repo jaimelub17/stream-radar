@@ -13,6 +13,11 @@ Outputs:
   data/raw/<hour>/*.json                    verbatim small API responses
   data/snapshots/<table>/<YYYY-MM>.csv      monthly partitions, one row per
                                             entity per snapshot hour
+  data/catalog/igdb_steam_map.csv           IGDB game id -> Steam appid
+                                            (catalog: queried once per game)
+  data/catalog/manual_map.csv               hand-maintained twitch_game_id ->
+                                            steam_appid overrides for games
+                                            Twitch carries no igdb_id for
 
 Tables: twitch_top_games, twitch_game_streams, twitch_top_streams,
 steam_player_counts.
@@ -58,13 +63,17 @@ TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 HELIX_BASE = "https://api.twitch.tv/helix"
 STEAM_MOST_PLAYED_URL = "https://api.steampowered.com/ISteamChartsService/GetMostPlayedGames/v1/"
 
+IGDB_BASE = "https://api.igdb.com/v4"
+IGDB_STEAM_SOURCE = 1  # external_games source id for Steam
+IGDB_MAP_PATH = ROOT / "data" / "catalog" / "igdb_steam_map.csv"
+
 SESSION = requests.Session()
 SESSION.headers["User-Agent"] = "stream-radar (portfolio research project)"
 
 
 # ---------------------------------------------------------------- http
 
-def request_json(method: str, url: str, *, params: dict | None = None, data: dict | None = None,
+def request_json(method: str, url: str, *, params: dict | None = None, data: dict | str | None = None,
                  headers: dict | None = None, attempts: int = 4, base_wait: float = 5.0):
     """Request with retry/backoff; 4xx other than 429 is permanent -> fail fast.
     (Lesson from the Steam collector: unretryable 404s once burned 7 minutes.)"""
@@ -174,8 +183,23 @@ class TwitchClient:
                 return get_json(HELIX_BASE + path, params=params, headers=headers)
             raise
 
+    def igdb(self, endpoint: str, body: str) -> list:
+        """Query the IGDB API (operated by Twitch - same credentials/token).
+        body is an APIcalypse query string."""
+        if self.token is None:
+            self._authenticate()
+        headers = {"Client-Id": self.client_id, "Authorization": f"Bearer {self.token}"}
+        try:
+            return request_json("POST", f"{IGDB_BASE}/{endpoint}", data=body, headers=headers)
+        except RuntimeError as exc:
+            if "HTTP 401" in str(exc):
+                self._authenticate()
+                headers["Authorization"] = f"Bearer {self.token}"
+                return request_json("POST", f"{IGDB_BASE}/{endpoint}", data=body, headers=headers)
+            raise
 
-def collect_twitch(twitch: TwitchClient, hour: str, month: str, hour_dir: Path, sleep_s: float) -> None:
+
+def collect_twitch(twitch: TwitchClient, hour: str, month: str, hour_dir: Path, sleep_s: float) -> list[str]:
     payload = twitch.get("/games/top", {"first": 100})
     dump_raw(hour_dir, "twitch_top_games.json", payload)
     games = payload.get("data", [])
@@ -257,6 +281,54 @@ def collect_twitch(twitch: TwitchClient, hour: str, month: str, hour_dir: Path, 
         top_stream_rows,
     )
     print(f"twitch_top_streams: {written} rows (partition {month} now {total_rows})")
+    return [r["igdb_id"] for r in game_rows]
+
+
+def update_igdb_map(twitch: TwitchClient, igdb_ids: list[str]) -> None:
+    """Map IGDB game ids to Steam appids via IGDB external_games.
+
+    Catalog-style, not a snapshot: only ids not yet in the map are queried.
+    Games with no Steam release are recorded with an empty steam_appid so
+    they aren't re-queried every run (a game that later releases on Steam
+    would need its row deleted to be re-fetched - acceptable for now).
+    A game can map to several appids (editions); all are kept."""
+    wanted = sorted({i for i in igdb_ids if i and i != "0" and str(i).isdigit()}, key=int)
+    rows: list[dict] = []
+    if IGDB_MAP_PATH.exists():
+        with IGDB_MAP_PATH.open(newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+    known = {r["igdb_id"] for r in rows}
+    missing = [i for i in wanted if i not in known]
+    if not missing:
+        print(f"igdb_map: no new ids (map covers {len(known)} games)")
+        return
+    now_utc = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    found: dict[str, list[str]] = {}
+    for start in range(0, len(missing), 100):
+        batch = missing[start:start + 100]
+        body = (f"fields game,uid,external_game_source; "
+                f"where game = ({','.join(batch)}) & external_game_source = {IGDB_STEAM_SOURCE}; limit 500;")
+        for entry in twitch.igdb("external_games", body):
+            found.setdefault(str(entry.get("game", "")), []).append(str(entry.get("uid", "")).strip())
+        time.sleep(0.3)  # IGDB allows 4 req/s
+    with_steam = 0
+    for igdb_id in missing:
+        uids = sorted(set(found.get(igdb_id, [])))
+        if uids:
+            with_steam += 1
+            for uid in uids:
+                if not uid.isdigit():
+                    print(f"  WARNING: igdb {igdb_id}: non-numeric Steam uid '{uid}'")
+                rows.append({"igdb_id": igdb_id, "steam_appid": uid, "fetched_at_utc": now_utc})
+        else:
+            rows.append({"igdb_id": igdb_id, "steam_appid": "", "fetched_at_utc": now_utc})
+    IGDB_MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with IGDB_MAP_PATH.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["igdb_id", "steam_appid", "fetched_at_utc"])
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"igdb_map: queried {len(missing)} new ids, {with_steam} have Steam appids "
+          f"(map now covers {len(known) + len(missing)} games)")
 
 
 # ---------------------------------------------------------------- steam
@@ -315,7 +387,9 @@ def main() -> int:
             print("Register a (free) app at https://dev.twitch.tv/console/apps,")
             print("then copy .env.example to .env and fill both values in.")
             return 2
-        collect_twitch(TwitchClient(client_id, client_secret), hour, month, hour_dir, args.twitch_sleep)
+        twitch = TwitchClient(client_id, client_secret)
+        igdb_ids = collect_twitch(twitch, hour, month, hour_dir, args.twitch_sleep)
+        update_igdb_map(twitch, igdb_ids)
 
     print(f"Done in {time.monotonic() - started:.0f}s")
     return 0

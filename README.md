@@ -36,7 +36,7 @@ Snapshots are keyed by UTC hour and idempotent (a retry replaces that hour's row
 | Twitch Helix `/games/top` | Top 100 categories by live viewers | Free app token |
 | Twitch Helix `/streams` | Per-game viewers, channels, concentration, languages, top streamers | Free app token |
 | Steam `GetMostPlayedGames` | Top 100 games by players (rank, last-week rank, daily peak) | Free, keyless |
-| IGDB `external_games` (planned) | Twitch game ↔ Steam appid mapping | Same Twitch token |
+| IGDB `external_games` | Twitch game ↔ Steam appid mapping (plus a hand-kept override file for categories Twitch carries no igdb_id for — notably CS2 and Dota 2) | Same Twitch token |
 
 ## Running it locally
 
