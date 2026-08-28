@@ -110,3 +110,21 @@ Build journal. One entry per step: what was done, why, how it was verified. A st
 - The mechanisms fired on real cases on day one: Waterpark Simulator at #2 with ENTRY + IGNITION (vanillamace = 88% of its viewers); alerts also caught moonmoon at 96% of Darkest Dungeon (rank 26). Rust itself shows share_top1 0.33→0.71 alongside its surge — the report exposes concentration so the *quality* of growth is readable, not just the quantity.
 - Day-0 honesty, logged as such: with 2 snapshots 4h apart, ENTRY flags are partly chart-rotation noise (uniform +1.50 block) and the 24h window is empty; both self-resolve as history accumulates.
 - Cloud cycle proven end to end: a dispatched Actions run collected, rebuilt the report on the runner, and committed both (`snapshot 2026-08-28T05:34Z` by github-actions[bot], including an auto-grown IGDB map for newly charted games). Between the local build and the CI rebuild 20 minutes later, the board moved on its own: Rust climbed to rank 13 (+248%/6h) and a new ignition case appeared (Halo: Combat Evolved, ENTRY + IGNITION:cdawg at 81% share).
+
+---
+
+## Step 6 — Second review hardening (2026-08-28)
+
+**Goal:** fix all seven findings from the post-Step-5 code review — this round was resilience seams and mission blind spots rather than happy-path crashes.
+
+**What:**
+- IGDB map update is now best-effort: any failure warns and the run continues (enrichment must never cost the snapshot).
+- Workflow restructured: data commits and pushes BEFORE the report builds, then the report commits separately — a report crash costs only the report and turns the run red without losing data.
+- Empty "no Steam" verdicts expire after 7 days while the game still charts, so pre-release games (the viral-launch cohort) get their Steam page picked up after release instead of being blind forever.
+- IGDB batches that hit the 500-row cap split and retry so no game can be silently mislabeled "no Steam".
+- Watched-vs-played now sums all mapped appids (consistent with steam_growth); Markdown-unsafe game names escaped; report builder reads only the trailing 2 monthly partitions (bounded cost; streamer reach becomes trailing-window reach, which is arguably the better definition anyway).
+
+**Verify:**
+- Synthetic tests against the real update_igdb_map with a stubbed client: stale empty verdict re-queried and replaced, fresh empty and mapped rows untouched, correct ids queried; 500-cap batch split fired (3 queries for a 2-game batch) with both games resolved. ALL PASS.
+- Live collect green (map grew to 92 games); live report build green on the new code path.
+- Bonus, and worth framing: **the ignition mechanism made its first verified call.** Waterpark Simulator was flagged (ENTRY + IGNITION, vanillamace at 88% share, rank 28) at snapshot 01; by snapshot 05 it sat at rank 2 with 69,157 viewers. Flag first, blowup after — on the system's first day.

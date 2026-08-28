@@ -66,6 +66,7 @@ STEAM_MOST_PLAYED_URL = "https://api.steampowered.com/ISteamChartsService/GetMos
 IGDB_BASE = "https://api.igdb.com/v4"
 IGDB_STEAM_SOURCE = 1  # external_games source id for Steam
 IGDB_MAP_PATH = ROOT / "data" / "catalog" / "igdb_steam_map.csv"
+IGDB_REQUERY_EMPTY_DAYS = 7  # no-Steam verdicts expire: pre-release games gain a store page later
 
 SESSION = requests.Session()
 SESSION.headers["User-Agent"] = "stream-radar (portfolio research project)"
@@ -289,8 +290,9 @@ def update_igdb_map(twitch: TwitchClient, igdb_ids: list[str]) -> None:
 
     Catalog-style, not a snapshot: only ids not yet in the map are queried.
     Games with no Steam release are recorded with an empty steam_appid so
-    they aren't re-queried every run (a game that later releases on Steam
-    would need its row deleted to be re-fetched - acceptable for now).
+    they aren't re-queried every run - but an empty verdict expires after
+    IGDB_REQUERY_EMPTY_DAYS while the game still charts, because a
+    pre-release game (the viral-launch cohort) gains its Steam page later.
     A game can map to several appids (editions); all are kept."""
     wanted = sorted({i for i in igdb_ids if i and i != "0" and str(i).isdigit()}, key=int)
     rows: list[dict] = []
@@ -298,17 +300,39 @@ def update_igdb_map(twitch: TwitchClient, igdb_ids: list[str]) -> None:
         with IGDB_MAP_PATH.open(newline="", encoding="utf-8") as f:
             rows = list(csv.DictReader(f))
     known = {r["igdb_id"] for r in rows}
-    missing = [i for i in wanted if i not in known]
+    mapped = {r["igdb_id"] for r in rows if r["steam_appid"]}
+    cutoff = datetime.now(timezone.utc).timestamp() - IGDB_REQUERY_EMPTY_DAYS * 86400
+    stale_empty: set[str] = set()
+    for r in rows:
+        if r["igdb_id"] in mapped or r["igdb_id"] not in set(wanted):
+            continue
+        try:
+            fetched = datetime.fromisoformat(r["fetched_at_utc"]).timestamp()
+        except ValueError:
+            fetched = 0.0
+        if fetched < cutoff:
+            stale_empty.add(r["igdb_id"])
+    missing = [i for i in wanted if i not in known] + sorted(stale_empty, key=int)
     if not missing:
         print(f"igdb_map: no new ids (map covers {len(known)} games)")
         return
+    rows = [r for r in rows if r["igdb_id"] not in stale_empty]  # expired verdicts get replaced
     now_utc = datetime.now(timezone.utc).isoformat(timespec="seconds")
     found: dict[str, list[str]] = {}
-    for start in range(0, len(missing), 100):
-        batch = missing[start:start + 100]
+    batches = [missing[i:i + 100] for i in range(0, len(missing), 100)]
+    while batches:
+        batch = batches.pop()
         body = (f"fields game,uid,external_game_source; "
                 f"where game = ({','.join(batch)}) & external_game_source = {IGDB_STEAM_SOURCE}; limit 500;")
-        for entry in twitch.igdb("external_games", body):
+        result = twitch.igdb("external_games", body)
+        if len(result) >= 500 and len(batch) > 1:
+            # response hit the row cap: rows past it were silently dropped, and a
+            # game whose rows all fell past the cap would be mislabeled "no Steam"
+            mid = len(batch) // 2
+            batches += [batch[:mid], batch[mid:]]
+            print(f"  WARNING: igdb batch of {len(batch)} hit the 500-row cap - splitting")
+            continue
+        for entry in result:
             found.setdefault(str(entry.get("game", "")), []).append(str(entry.get("uid", "")).strip())
         time.sleep(0.3)  # IGDB allows 4 req/s
     with_steam = 0
@@ -389,7 +413,10 @@ def main() -> int:
             return 2
         twitch = TwitchClient(client_id, client_secret)
         igdb_ids = collect_twitch(twitch, hour, month, hour_dir, args.twitch_sleep)
-        update_igdb_map(twitch, igdb_ids)
+        try:
+            update_igdb_map(twitch, igdb_ids)
+        except Exception as exc:  # best-effort enrichment must never cost the snapshot
+            print(f"  WARNING: igdb map update failed, continuing without it: {exc!r}")
 
     print(f"Done in {time.monotonic() - started:.0f}s")
     return 0

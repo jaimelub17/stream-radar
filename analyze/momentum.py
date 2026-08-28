@@ -55,16 +55,23 @@ MIN_VIEWERS = 1500        # noise floor for the leaderboard
 TOP_ESTABLISHED = 20      # ignition only matters outside this rank
 SHORT_HOURS = 6
 DAY_HOURS = 24
+HISTORY_MONTHS = 2        # trailing monthly partitions to read; growth windows need
+                          # days, and streamer reach is better recent than eternal
 
 
 def load_table(table: str) -> list[dict]:
     rows: list[dict] = []
     folder = SNAP_DIR / table
     if folder.exists():
-        for part in sorted(folder.glob("*.csv")):
+        for part in sorted(folder.glob("*.csv"))[-HISTORY_MONTHS:]:
             with part.open(newline="", encoding="utf-8") as f:
                 rows.extend(csv.DictReader(f))
     return rows
+
+
+def md_escape(text: str) -> str:
+    """Keep game names from breaking Markdown table rows."""
+    return text.replace("|", "\\|")
 
 
 def load_catalog(name: str) -> list[dict]:
@@ -229,6 +236,7 @@ def main() -> int:
             "score": round(sum(comp.values()), 3),
             "components": ";".join(f"{k}={v:+.2f}" for k, v in sorted(comp.items())),
             "steam_appid": (appids or [""])[0],
+            "_appids": appids,
         })
 
     board = sorted(
@@ -250,9 +258,8 @@ def main() -> int:
     # watched vs played extremes (latest hour, mapped + on the Steam chart)
     ratios = []
     for r in rows_out:
-        if not r["steam_appid"]:
-            continue
-        peak = steam_peak.get((latest, r["steam_appid"]), 0)
+        # sum all mapped appids (editions), matching the steam_growth component
+        peak = sum(steam_peak.get((latest, a), 0) for a in r["_appids"])
         if peak and r["viewers_top100"]:
             ratios.append((round(r["viewers_top100"] / peak, 3), r["name"], r["viewers_top100"], peak))
     ratios.sort(reverse=True)
@@ -272,7 +279,7 @@ def main() -> int:
     ]
     for i, r in enumerate(board[:15], start=1):
         lines.append(
-            f"| {i} | {r['name']} | {r['score']:+.2f} | {r['rank']} | {r['viewers_top100']:,} "
+            f"| {i} | {md_escape(r['name'])} | {r['score']:+.2f} | {r['rank']} | {r['viewers_top100']:,} "
             f"| {fmt_pct(r['v_short'])} | {fmt_pct(r['v_day'])} | {r['channels_top100']} "
             f"| {fmt_pct(r['c_short'])} | {r['share_top1']} | {r['flags']} |")
     lines += [
@@ -286,7 +293,7 @@ def main() -> int:
     if alerts:
         lines += ["| game | streamer | their max reach | viewers now | share of game | game rank |",
                   "|------|----------|----------------|-------------|--------------|-----------|"]
-        lines += [f"| {n} | {s} | {rc:,} | {v:,} | {sh:.0%} | {rk} |" for n, s, rc, v, sh, rk in alerts[:10]]
+        lines += [f"| {md_escape(n)} | {md_escape(s)} | {rc:,} | {v:,} | {sh:.0%} | {rk} |" for n, s, rc, v, sh, rk in alerts[:10]]
     else:
         lines.append("*(none this snapshot)*")
     lines += [
@@ -297,7 +304,7 @@ def main() -> int:
         "|-------|------|----------------|------------|",
     ]
     for ratio, name, v, p in ratios[:5] + ([] if len(ratios) <= 10 else ratios[-5:]):
-        lines.append(f"| {ratio} | {name} | {v:,} | {p:,} |")
+        lines.append(f"| {ratio} | {md_escape(name)} | {v:,} | {p:,} |")
     lines += [
         "",
         "---",
