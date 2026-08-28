@@ -54,3 +54,15 @@ Build journal. One entry per step: what was done, why, how it was verified. A st
 **Verify:**
 - Synthetic tests (scratchpad, against the real `upsert_csv`): intra-batch dedupe first-wins with warning; same-hour replace; column removal doesn't crash; column add backfills empty — ALL PASS.
 - Live run (22s), landing in the same UTC hour as Step 1's runs: partition files written, 0 duplicate keys across all four tables, growth only by union-of-observations (102 games / 104 Steam apps seen within hour 2026-08-28T01 across four runs — the same chart-rotation mechanism as Step 1's Corsair Cove case, now at scale).
+
+---
+
+## Step 3 — Self-refreshing via GitHub Actions (2026-08-28)
+
+**Goal:** history must accumulate without a PC being on. GitHub Actions runs the collector every 2 hours and commits what it collects — the public repo becomes a self-updating dataset.
+
+**What:**
+- `.github/workflows/collect.yml`: cron `17 */2 * * *` (minute offset because GitHub delays top-of-hour crons), plus manual `workflow_dispatch`. Ubuntu runner, Python 3.12, collector credentials from encrypted repo secrets, then `data/` committed as github-actions[bot] (skips empty commits, rebases before push). `concurrency: collect` prevents overlapping runs.
+- Public repo `github.com/jaimelub17/stream-radar`; README badge shows collect status. Twitch credentials uploaded via GitHub's encrypted-secrets API (libsodium sealed box against the repo public key), never through the browser UI.
+
+**Verify:** (pending — first green Actions run with a bot data commit)

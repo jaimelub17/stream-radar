@@ -1,5 +1,7 @@
 # Stream Radar
 
+![collect](https://github.com/jaimelub17/stream-radar/actions/workflows/collect.yml/badge.svg)
+
 Which game is Twitch about to crown next? A data-science project that watches live Twitch viewership and Steam player counts, and learns to call breakout games **before** they peak.
 
 Streamers and video creators constantly ask "what should I cover next?" — by the time a game tops the charts, that window is gone. Stream Radar snapshots the live rankings every couple of hours and turns its own accumulated history into predictive signals.
