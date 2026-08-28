@@ -65,4 +65,9 @@ Build journal. One entry per step: what was done, why, how it was verified. A st
 - `.github/workflows/collect.yml`: cron `17 */2 * * *` (minute offset because GitHub delays top-of-hour crons), plus manual `workflow_dispatch`. Ubuntu runner, Python 3.12, collector credentials from encrypted repo secrets, then `data/` committed as github-actions[bot] (skips empty commits, rebases before push). `concurrency: collect` prevents overlapping runs.
 - Public repo `github.com/jaimelub17/stream-radar`; README badge shows collect status. Twitch credentials uploaded via GitHub's encrypted-secrets API (libsodium sealed box against the repo public key), never through the browser UI.
 
-**Verify:** (pending — first green Actions run with a bot data commit)
+**Verify (2026-08-28):**
+- Repo created through the GitHub API using the machine's stored git credential (gh CLI isn't installed); all commits pushed including the workflow file (the stored token carries the `workflow` scope, without which that push is rejected).
+- Both secrets uploaded via the encrypted-secrets API → `created`; `workflow_dispatch` accepted (HTTP 204).
+- First cloud run: **success** (actions/runs/33133516905). The bot committed `snapshot 2026-08-28T01:39Z`.
+- That run landed *inside the same UTC hour* as the local Step 1/2 runs — so the runner upserted hour 01 in place (801 insertions / 786 deletions) and the pulled table still has 0 duplicate keys. Cloud and local collectors colliding on one snapshot hour and producing a clean table is the cross-machine idempotency proof.
+- Cron fires every 2 hours at :17 UTC from here on; the repo now grows on its own.
